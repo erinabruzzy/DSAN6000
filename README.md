@@ -16,3 +16,60 @@ This project aims to create an interactive dashboard to house all of the data pe
 - Predict/forecast future needs
 - Allow for the application of more modern analytical tools
 - Simplify outputs for nontechnical audiences 
+
+### AWS Information
+
+In AWS Academy, open the lab’s AWS Details and copy its AWS CLI credentials/export block into the master terminal. 
+
+On the master node terminal, open the credentials file:
+
+First time:
+```
+mkdir -p ~/.aws
+nano ~/.aws/credentials
+```
+
+Otherwise:
+```
+nano ~/.aws/credentials
+```
+
+In nano, paste the entire AWS Details block, including [default]:
+
+```
+[default]
+aws_access_key_id = YOUR_ACCESS_KEY_ID
+aws_secret_access_key = YOUR_SECRET_ACCESS_KEY
+aws_session_token = YOUR_SESSION_TOKEN
+```
+
+Save with Ctrl+O, Enter, then exit with Ctrl+X. Keep the session token line if AWS Details provided one; temporary Academy credentials need it.
+
+Then secure the file:
+
+```
+chmod 600 ~/.aws/credentials
+```
+
+Verify the credentials without printing them:
+
+```
+aws sts get-caller-identity
+```
+
+If that works, try an upload:
+```
+aws s3 cp \
+  s3://dsan6000-final/nyc-shelters/intake_log.csv \
+  s3://dsan6000-nyc-dashboard-data/source/nyc-shelters/intake_log.csv \
+  --copy-props metadata-directive
+```
+
+**Public S3 Bucket Name: dsan6000-nyc-dashboard-data**
+
+```
+aws s3 ls s3://dsan6000-nyc-dashboard-data/ --recursive --no-sign-request
+2026-11-20 16:31:18     221363 DHS_Daily_Report_20261120.csv
+2026-11-20 16:26:36       3565 intakes_codebook.csv
+2026-11-20 16:50:43 4055249999 source/nyc-shelters/intake_log.csv
+```
