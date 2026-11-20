@@ -1,7 +1,7 @@
 # DSAN6000 Big Data & Cloud Computing: Final Project
 ### Authors: Erin Brzusek and Jackson Howes
 
-### Abstract 
+## Abstract 
 
 New York City is one of the most recognizable cities in the world. The glitz and glamor of broadway theatres, the appeal of the incredible restaurant scene, and mindbending skyscrapers are contrasted with the likes of a homeless and housing insecure population not seen since the Great Depression:
 
@@ -17,7 +17,44 @@ This project aims to create an interactive dashboard to house all of the data pe
 - Allow for the application of more modern analytical tools
 - Simplify outputs for nontechnical audiences 
 
-### AWS Information
+
+## Data Dashboard
+
+The Streamlit dashboard separates the NYC DHS daily census totals from statistics
+calculated over the synthetic intake records.
+
+![](images/dashboard_1.png)
+
+Intake records do not indicate
+whether a person is currently in shelter, so their counts and age/children
+statistics are labeled as intake-record measures rather than current occupancy.
+
+![](images/dashboard_2.png)
+
+On the Spark master, install the dashboard dependencies in the Python
+environment that has PySpark:
+
+```bash
+python3 -m pip install -r requirements-dashboard.txt
+```
+
+Set the Spark standalone master URL and start the dashboard:
+
+```bash
+export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
+streamlit run dashboard.py --server.address 127.0.0.1 --server.port 8501
+```
+
+The report path defaults to the current daily report object. Set
+`DHS_DAILY_REPORT_PATH` if you upload a newer report under another name.
+
+Open port 8501 through VS Code's port forwarding or an SSH tunnel; do not expose
+the dashboard port publicly. `SPARK_MASTER_URL` defaults to `local[*]` if it is
+not set. The dashboard reads the public S3 objects anonymously and caches the
+daily report and the aggregated intake results for one hour.
+
+
+## AWS S3 Bucket
 
 In AWS Academy, open the lab’s AWS Details and copy its AWS CLI credentials/export block into the master terminal. 
 
