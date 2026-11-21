@@ -31,18 +31,37 @@ statistics are labeled as intake-record measures rather than current occupancy.
 
 ![](images/dashboard_2.png)
 
-On the Spark master, install the dashboard dependencies in the Python
-environment that has PySpark:
+## Python Environment (uv)
+
+Dependencies are managed with [uv](https://docs.astral.sh/uv/) and pinned in
+`uv.lock`. Spark itself needs Java 17 or newer on every node, and the PyPI
+`pyspark` version (4.3.0) must match the Spark install in `~/spark`.
+
+Install uv once on the Spark master:
 
 ```bash
-python3 -m pip install -r requirements-dashboard.txt
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
+
+From the repository root, create `.venv` with the pinned Python (3.14) and
+all dependencies, including the notebook tools:
+
+```bash
+uv sync
+```
+
+Run commands inside the environment with `uv run` (no activation needed). For
+the EDA notebook, select the `.venv` kernel (`.venv/bin/python`) in VS Code or
+Jupyter. After pulling changes that touch `pyproject.toml` or `uv.lock`, run
+`uv sync` again.
+
+## Running the Dashboard
 
 Set the Spark standalone master URL and start the dashboard:
 
 ```bash
 export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
-streamlit run dashboard.py --server.address 127.0.0.1 --server.port 8501
+uv run streamlit run dashboard.py --server.address 127.0.0.1 --server.port 8501
 ```
 
 The report path defaults to the current daily report object. Set
