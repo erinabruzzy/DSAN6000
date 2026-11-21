@@ -202,9 +202,11 @@ population_breakdown = pd.DataFrame(
 ).set_index("Group")
 st.bar_chart(population_breakdown)
 
-trend_start = selected_report["census_date"] - pd.Timedelta(days=365)
+trend_end = pd.Timestamp(selected_report["census_date"])
+# DateOffset avoids a NumPy 2.5 deprecation warning raised by pd.Timedelta in pandas 2.3.
+trend_start = trend_end - pd.DateOffset(days=365)
 population_trend = report.loc[
-    report["census_date"].between(trend_start, selected_report["census_date"]),
+    report["census_date"].between(trend_start, trend_end),
     ["census_date", "adults", "children"],
 ].set_index("census_date")
 st.caption(
@@ -315,5 +317,5 @@ st.dataframe(
         }
     ),
     hide_index=True,
-    use_container_width=True,
+    width="stretch",
 )
