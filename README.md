@@ -23,6 +23,22 @@ This project aims to create an interactive dashboard to house all of the data pe
 The Streamlit dashboard separates the NYC DHS daily census totals from statistics
 calculated over the synthetic intake records.
 
+For the selected census date, the DHS section shows:
+
+- totals with their change from the previous day;
+- **alerts** for unusual day-over-day changes, meaning 3 or more standard
+  deviations from the average daily change over the previous 90 days (about 1%
+  of days per series in the 2021–2026 history);
+- a breakdown of who is in shelter (single men and women, adults and children
+  in families, adult families);
+- household-group trendlines, daily over the last 12 months or as monthly
+  averages since 2021.
+
+Every chart has hover tooltips and a table view. A warning appears if the
+newest census is more than 4 days old, which usually means the daily ingest
+job has stopped. The calculations live in `census.py`; run their tests with
+`uv run pytest`.
+
 ![](images/dashboard_1.png)
 
 Intake records do not indicate
