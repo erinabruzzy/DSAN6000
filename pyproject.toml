@@ -12,6 +12,7 @@ dependencies = [
     "pyarrow>=16",
     "streamlit>=1.50,<2",  # st.context.theme, width="stretch"
     "altair>=5.4,<7",
+    "statsmodels>=0.14",
 ]
 
 [dependency-groups]
