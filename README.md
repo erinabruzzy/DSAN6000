@@ -55,6 +55,22 @@ the EDA notebook, select the `.venv` kernel (`.venv/bin/python`) in VS Code or
 Jupyter. After pulling changes that touch `pyproject.toml` or `uv.lock`, run
 `uv sync` again.
 
+## Building the Curated Intake Tables
+
+The dashboard reads the intake records from curated Parquet tables rather than
+the 4 GB source CSV. Build them once (and again whenever the source CSV
+changes) on the Spark master. This step needs the AWS credentials described in
+[AWS S3 Bucket](#aws-s3-bucket) because it writes to the bucket:
+
+```bash
+export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
+uv run python etl/intake_to_parquet.py
+```
+
+This writes `s3a://dsan6000-nyc-dashboard-data/curated/intakes/` (used by the
+dashboard) and `curated/intake_details/` (notes and photos), both partitioned
+by `intake_month`, and checks the row counts against the source.
+
 ## Running the Dashboard
 
 Set the Spark standalone master URL and start the dashboard:
@@ -65,7 +81,9 @@ uv run streamlit run dashboard.py --server.address 127.0.0.1 --server.port 8501
 ```
 
 The report path defaults to the current daily report object. Set
-`DHS_DAILY_REPORT_PATH` if you upload a newer report under another name.
+`DHS_DAILY_REPORT_PATH` if you upload a newer report under another name, and
+`INTAKE_PARQUET_PATH` to read the curated intake table from somewhere other
+than `curated/intakes/`.
 
 Open port 8501 through VS Code's port forwarding or an SSH tunnel; do not expose
 the dashboard port publicly. `SPARK_MASTER_URL` defaults to `local[*]` if it is

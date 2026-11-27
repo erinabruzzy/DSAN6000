@@ -3,52 +3,23 @@ from datetime import timedelta
 
 import pandas as pd
 import streamlit as st
+from pyspark.errors import AnalysisException
 from pyspark.sql import SparkSession, functions as F
-from pyspark.sql.types import (
-    BooleanType,
-    DateType,
-    IntegerType,
-    StringType,
-    StructField,
-    StructType,
-)
 
 st.set_page_config(page_title="NYC Shelter Snapshot", layout="wide")
 
 BUCKET = "dsan6000-nyc-dashboard-data"
-DEFAULT_INTAKE_PATH = f"s3a://{BUCKET}/source/nyc-shelters/intake_log.csv"
+# Curated Parquet written by etl/intake_to_parquet.py (partitioned by intake_month).
+DEFAULT_INTAKE_PATH = f"s3a://{BUCKET}/curated/intakes"
 DEFAULT_REPORT_PATH = f"s3a://{BUCKET}/DHS_Daily_Report_20261120.csv"
-
-INTAKE_SCHEMA = StructType(
-    [
-        StructField("intake_id", StringType(), True),
-        StructField("synthetic_data", BooleanType(), True),
-        StructField("client_display_name", StringType(), True),
-        StructField("age", IntegerType(), True),
-        StructField("household_type", StringType(), True),
-        StructField("children_count", IntegerType(), True),
-        StructField("program_type", StringType(), True),
-        StructField("contact_type", StringType(), True),
-        StructField("intake_date", DateType(), True),
-        StructField("presenting_reason", StringType(), True),
-        StructField("prior_living_situation_reported", StringType(), True),
-        StructField("reported_housing_instability_days", IntegerType(), True),
-        StructField("employment_status_reported", StringType(), True),
-        StructField("income_status_reported", StringType(), True),
-        StructField("primary_barrier", StringType(), True),
-        StructField("immediate_needs", StringType(), True),
-        StructField("potential_referral", StringType(), True),
-        StructField("referral_status", StringType(), True),
-        StructField("client_goal", StringType(), True),
-        StructField("follow_up_days", IntegerType(), True),
-        StructField("follow_up_target_date", DateType(), True),
-        StructField("housing_eligibility_verified", BooleanType(), True),
-        StructField("staff_role", StringType(), True),
-        StructField("note_word_count", IntegerType(), True),
-        StructField("intake_note", StringType(), True),
-        StructField("intake_photo_b64", StringType(), True),
-    ]
-)
+INTAKE_COLUMNS = [
+    "synthetic_data",
+    "intake_date",
+    "program_type",
+    "household_type",
+    "age",
+    "children_count",
+]
 
 
 @st.cache_resource
@@ -92,25 +63,11 @@ def load_daily_report(path: str) -> pd.DataFrame:
     )
 
 
-@st.cache_data(
-    ttl=3600, show_spinner="Scanning and aggregating synthetic intake records..."
-)
+@st.cache_data(ttl=3600, show_spinner="Aggregating synthetic intake records...")
 def load_intake_summary(path: str) -> tuple[pd.DataFrame, int]:
     spark = get_spark()
-    records = (
-        spark.read.schema(INTAKE_SCHEMA)
-        .option("header", "true")
-        .option("multiLine", "true")
-        .csv(path)
-        .select(
-            "synthetic_data",
-            "intake_date",
-            "program_type",
-            "household_type",
-            "age",
-            "children_count",
-        )
-    )
+    # Parquet is columnar, so selecting six columns reads only those columns.
+    records = spark.read.parquet(path).select(*INTAKE_COLUMNS)
     summary = (
         records.groupBy(
             "synthetic_data", "intake_date", "program_type", "household_type"
@@ -216,8 +173,18 @@ st.line_chart(population_trend)
 
 st.divider()
 st.subheader("Synthetic intake-record profile")
-intake_path = os.getenv("INTAKE_S3_PATH", DEFAULT_INTAKE_PATH)
-intakes, excluded_records = load_intake_summary(intake_path)
+intake_path = os.getenv("INTAKE_PARQUET_PATH", DEFAULT_INTAKE_PATH)
+try:
+    intakes, excluded_records = load_intake_summary(intake_path)
+except AnalysisException as error:
+    if getattr(error, "getCondition", lambda: None)() != "PATH_NOT_FOUND":
+        raise
+    st.error(
+        f"No curated intake table at `{intake_path}`. Run "
+        "`uv run python etl/intake_to_parquet.py` on the Spark master first "
+        "(see README)."
+    )
+    st.stop()
 undated_records = int(
     intakes.loc[intakes["intake_date"].isna(), "intake_records"].sum()
 )
