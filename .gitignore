@@ -1,0 +1,13 @@
+# OS / download metadata
+*:Zone.Identifier
+.DS_Store
+
+# Quarto render output
+proj-report-files/docs/
+proj-report-files/site_libs/
+proj-report-files/index_files/
+
+# Python / uv
+.venv/
+__pycache__/
+.ipynb_checkpoints/
