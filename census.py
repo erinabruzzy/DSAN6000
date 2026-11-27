@@ -87,6 +87,33 @@ def _empty_alerts() -> pd.DataFrame:
     return pd.DataFrame(columns=["series", "change", "typical_change", "z"])
 
 
+# Look-back periods for changes_since, in days.
+HORIZONS = {"previous day": 1, "a week earlier": 7, "four weeks earlier": 28}
+
+
+def changes_since(
+    report: pd.DataFrame, as_of: pd.Timestamp, horizons: dict[str, int] = HORIZONS
+) -> pd.DataFrame:
+    """Each ALERT_COLUMNS series on `as_of`, and its change since each horizon.
+
+    A change is missing (NA) when the report has no row for that earlier date.
+    """
+    daily = report.set_index("census_date").sort_index()
+    rows = []
+    for column, label in ALERT_COLUMNS.items():
+        row = {"series": label, "count": int(daily.at[as_of, column])}
+        for name, days in horizons.items():
+            earlier = as_of - pd.DateOffset(days=days)
+            row[name] = (
+                int(daily.at[as_of, column] - daily.at[earlier, column])
+                if earlier in daily.index
+                else pd.NA
+            )
+        rows.append(row)
+    table = pd.DataFrame(rows)
+    return table.astype({name: "Int64" for name in horizons})
+
+
 def group_trend(
     report: pd.DataFrame,
     start: pd.Timestamp | None = None,

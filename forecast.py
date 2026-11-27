@@ -98,6 +98,21 @@ def daily_counts(dates: pd.Series, counts: pd.Series) -> pd.Series:
     return totals.reindex(days, fill_value=0).astype("int64")
 
 
+@dataclass
+class LatestDay:
+    date: pd.Timestamp
+    count: int
+    # Average of the 4 same weekdays before it, or None with less history.
+    weekday_average: float | None
+
+
+def latest_day_summary(counts: pd.Series) -> LatestDay:
+    """The newest day's count next to the average of its last 4 same weekdays."""
+    history = counts.iloc[:-1]
+    average = last_four_same_weekdays(history) if len(history) >= 28 else None
+    return LatestDay(counts.index[-1], int(counts.iloc[-1]), average)
+
+
 def backtest(counts: pd.Series, method, days: int) -> pd.DataFrame:
     """Forecast each of the last `days` days from only the days before it."""
     start = len(counts) - days

@@ -23,6 +23,13 @@ This project aims to create an interactive dashboard to house all of the data pe
 The Streamlit dashboard separates the NYC DHS daily census totals from statistics
 calculated over the synthetic intake records.
 
+It opens with **latest data at a glance**: the newest DHS census, with each
+group's change over 1, 7, and 28 days, and the newest intake day against the
+average of its last 4 same weekdays, plus the next-day forecast. Both
+sources are daily (DHS publishes each census about two days later, and intake
+records have no time of day), so this replaces the "previous 12 hours" view
+proposed in issue #5.
+
 For the selected census date, the DHS section shows:
 
 - totals with their change from the previous day;
