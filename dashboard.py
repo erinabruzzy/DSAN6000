@@ -16,6 +16,13 @@ from census import (
     group_trend,
     unusual_changes,
 )
+from forecast import (
+    INTERVAL,
+    MIN_TRAINING_DAYS,
+    NextDayForecast,
+    daily_counts,
+    forecast_next_day,
+)
 
 st.set_page_config(page_title="NYC Shelter Snapshot", layout="wide")
 
@@ -170,6 +177,116 @@ def breakdown_chart(table: pd.DataFrame, colors: dict) -> alt.LayerChart:
     return (bars + labels).properties(height=alt.Step(40))
 
 
+@st.cache_data(ttl=3600, show_spinner="Backtesting the intake forecast...")
+def cached_forecast(counts: pd.Series) -> NextDayForecast | None:
+    return forecast_next_day(counts)
+
+
+def forecast_chart(result: NextDayForecast, colors: dict) -> alt.LayerChart:
+    """Backtest days (actual vs one-day-ahead forecast) plus the next day with its range."""
+    names = ["Actual intakes", "Forecast from the days before"]
+    wide = result.backtest.copy()
+    upcoming = pd.DataFrame(
+        {
+            "date": [result.date],
+            "forecast": [result.value],
+            "low": [result.low],
+            "high": [result.high],
+        }
+    )
+    long = pd.concat(
+        [
+            wide.assign(series=names[0], count=wide["actual"]),
+            wide.assign(series=names[1], count=wide["forecast"]),
+            upcoming.assign(series=names[1], count=upcoming["forecast"]),
+        ]
+    )[["date", "series", "count"]]
+
+    x = alt.X("date:T", title=None, axis=alt.Axis(format="%b %d", labelOverlap=True))
+    y = alt.Y(
+        "count:Q",
+        title="Intakes per day",
+        scale=alt.Scale(zero=False),
+        axis=alt.Axis(labelExpr=COUNT_LABELS),
+    )
+    color = alt.Color(
+        "series:N",
+        scale=alt.Scale(domain=names, range=colors["series"][:2]),
+        legend=alt.Legend(orient="top", title=None, labelLimit=0),
+    )
+    hover = alt.selection_point(
+        fields=["date"], nearest=True, on="pointerover", clear="pointerout", empty=False
+    )
+    shown_on_hover = alt.condition(hover, alt.value(1), alt.value(0))
+
+    lines = alt.Chart(long).mark_line(strokeWidth=2).encode(x=x, y=y, color=color)
+    points = (
+        alt.Chart(long)
+        .mark_point(filled=True, size=70, stroke=colors["surface"], strokeWidth=2)
+        .encode(x=x, y=y, color=color, opacity=shown_on_hover)
+    )
+    # Tooltip text is preformatted per row: a backtest day has an actual count
+    # and an error, the next day has no actual yet but has a range.
+    hover_rows = pd.DataFrame(
+        {
+            "date": [*wide["date"], result.date],
+            "actual_text": [f"{value:,}" for value in wide["actual"]] + ["Not known yet"],
+            "forecast_text": [f"{value:,.0f}" for value in wide["forecast"]]
+            + [f"{result.value:,.0f}"],
+            "note_text": [
+                f"Off by {abs(actual - forecast):,.0f}"
+                for actual, forecast in zip(wide["actual"], wide["forecast"])
+            ]
+            + [f"{INTERVAL:.0%} range {result.low:,.0f} – {result.high:,.0f}"],
+        }
+    )
+    rule = (
+        alt.Chart(hover_rows)
+        .mark_rule(color=colors["rule"], strokeWidth=1)
+        .encode(
+            x=x,
+            opacity=shown_on_hover,
+            tooltip=[
+                alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
+                alt.Tooltip("actual_text:N", title=names[0]),
+                alt.Tooltip("forecast_text:N", title="Forecast"),
+                alt.Tooltip("note_text:N", title="Detail"),
+            ],
+        )
+        .add_params(hover)
+    )
+    # The next day: its range as a vertical bar, the forecast as a ringed dot.
+    next_range = (
+        alt.Chart(upcoming)
+        .mark_rule(color=colors["series"][1], strokeWidth=2)
+        .encode(x=x, y="low:Q", y2="high:Q")
+    )
+    next_point = (
+        alt.Chart(upcoming)
+        .mark_point(
+            filled=True,
+            size=90,
+            color=colors["series"][1],
+            stroke=colors["surface"],
+            strokeWidth=2,
+        )
+        .encode(x=x, y=alt.Y("forecast:Q"))
+    )
+    next_label = (
+        alt.Chart(upcoming)
+        .mark_text(align="left", dx=10, color=colors["text"])
+        .encode(
+            x=x,
+            y=alt.Y("forecast:Q"),
+            text=alt.Text("forecast:Q", format=",.0f"),
+        )
+    )
+    # The hover rule goes last so marks drawn above it can't swallow the pointer.
+    return alt.layer(lines, next_range, points, next_point, next_label, rule).properties(
+        height=320, padding={"left": 5, "top": 5, "bottom": 5, "right": 40}
+    )
+
+
 def trend_chart(wide: pd.DataFrame, colors: dict, monthly: bool) -> alt.LayerChart:
     """One line per household group, with a hover rule listing every group's value."""
     names = list(GROUPS.values())
@@ -225,7 +342,8 @@ def trend_chart(wide: pd.DataFrame, colors: dict, monthly: bool) -> alt.LayerCha
         .mark_text(align="left", dx=8, color=colors["text"])
         .encode(x=x, y=y, text="group:N")
     )
-    return alt.layer(lines, rule, points, end_labels).properties(
+    # The hover rule goes last so marks drawn above it can't swallow the pointer.
+    return alt.layer(lines, points, end_labels, rule).properties(
         height=380, padding={"left": 5, "top": 5, "bottom": 5, "right": 170}
     )
 
@@ -367,6 +485,61 @@ valid_intakes = intakes.dropna(subset=["intake_date"]).copy()
 if valid_intakes.empty:
     st.info("There are no synthetic intake records with a usable intake date.")
     st.stop()
+
+st.markdown("**Next-day intake forecast**")
+intake_counts = daily_counts(valid_intakes["intake_date"], valid_intakes["intake_records"])
+next_day = cached_forecast(intake_counts)
+if next_day is None:
+    st.info(
+        f"The forecast needs at least {MIN_TRAINING_DAYS + 14} days of intake "
+        f"records; there are {len(intake_counts)}."
+    )
+else:
+    forecast_columns = st.columns(3)
+    forecast_columns[0].metric(
+        f"Forecast for {next_day.date:%B %d, %Y}", f"{next_day.value:,.0f} intakes"
+    )
+    forecast_columns[1].metric(
+        f"{INTERVAL:.0%} range", f"{next_day.low:,.0f} – {next_day.high:,.0f}"
+    )
+    forecast_columns[2].metric(
+        f"Average error, last {len(next_day.backtest)} days",
+        f"±{next_day.scores[next_day.method]:,.1f}",
+    )
+    st.caption(
+        "Intake records have a date but no time of day, so this forecasts the day "
+        f"after the latest intake ({intake_counts.index[-1]:%B %d, %Y}), using all "
+        f"synthetic records regardless of the filters. Method: **{next_day.method}**, "
+        "which had the lowest average error when each of the last "
+        f"{len(next_day.backtest)} days was forecast from only the days before it. "
+        f"The range covers {INTERVAL:.0%} of those errors."
+    )
+    st.altair_chart(forecast_chart(next_day, colors), width="stretch")
+    with st.expander("How the methods compared"):
+        st.dataframe(
+            next_day.scores.rename("Average error (intakes per day)")
+            .rename_axis("Method")
+            .reset_index(),
+            column_config={
+                "Average error (intakes per day)": st.column_config.NumberColumn(
+                    format="%.1f"
+                )
+            },
+            hide_index=True,
+            width="stretch",
+        )
+        st.dataframe(
+            next_day.backtest.sort_values("date", ascending=False),
+            column_config={
+                "date": st.column_config.DateColumn("Date", format="MMM D, YYYY"),
+                "actual": "Actual intakes",
+                "forecast": st.column_config.NumberColumn(
+                    "Forecast from the days before", format="%.0f"
+                ),
+            },
+            hide_index=True,
+            width="stretch",
+        )
 
 minimum_date = valid_intakes["intake_date"].min().date()
 maximum_date = valid_intakes["intake_date"].max().date()

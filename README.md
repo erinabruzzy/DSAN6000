@@ -36,7 +36,18 @@ For the selected census date, the DHS section shows:
 
 Every chart has hover tooltips and a table view. A warning appears if the
 newest census is more than 4 days old, which usually means the daily ingest
-job has stopped. The calculations live in `census.py`; run their tests with
+job has stopped.
+
+The intake section opens with a **next-day intake forecast**. Intake records
+have a date but no time of day, so it forecasts the day after the latest
+intake. Three methods are compared: same weekday last week, the average of
+the last 4 same weekdays, and Holt-Winters with weekly seasonality. Each one
+forecasts each of the last 56 days from only the days before it, and the
+method with the lowest average error makes the forecast. Its past errors set
+an 80% range. The page shows every method's score and the day-by-day
+backtest.
+
+The calculations live in `census.py` and `forecast.py`; run their tests with
 `uv run pytest`.
 
 ![](images/dashboard_1.png)
