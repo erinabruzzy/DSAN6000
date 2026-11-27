@@ -47,8 +47,16 @@ method with the lowest average error makes the forecast. Its past errors set
 an 80% range. The page shows every method's score and the day-by-day
 backtest.
 
-The calculations live in `census.py` and `forecast.py`; run their tests with
-`uv run pytest`.
+Below the household-type chart, the dashboard drills down to **individual
+intake records**. Click a bar (or use the selectbox) to choose a household
+type, pick a day in the sidebar's date range, and select a row to open the
+whole record: every field, the intake note, and the intake photo. Each step
+reads only what it needs: one month's folder of `curated/intakes/` for the
+day's list, and one day's folder of `curated/intake_details/` for the note and
+photo. All of these records are synthetic.
+
+The calculations live in `census.py`, `forecast.py`, and `records.py`; run
+their tests with `uv run pytest`.
 
 ![](images/dashboard_1.png)
 
@@ -94,9 +102,11 @@ export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
 uv run python etl/intake_to_parquet.py
 ```
 
-This writes `s3a://dsan6000-nyc-dashboard-data/curated/intakes/` (used by the
-dashboard) and `curated/intake_details/` (notes and photos), both partitioned
-by `intake_month`, and checks the row counts against the source.
+This writes `s3a://dsan6000-nyc-dashboard-data/curated/intakes/` (every field
+except the note and photo, partitioned by `intake_month`) and
+`curated/intake_details/` (notes and photos, partitioned by `intake_date` so
+the dashboard can open one record without scanning a month of photos), and
+checks the row counts against the source.
 
 ## Ingesting the DHS Daily Report
 
@@ -139,9 +149,9 @@ uv run streamlit run dashboard.py --server.address 127.0.0.1 --server.port 8501
 ```
 
 The dashboard reads the two curated tables built above and shows which ETL
-job to run if one is missing. Set `DHS_DAILY_PATH` or `INTAKE_PARQUET_PATH`
-to read them from somewhere other than `curated/dhs_daily/` and
-`curated/intakes/`.
+job to run if one is missing. Set `DHS_DAILY_PATH`, `INTAKE_PARQUET_PATH`, or
+`INTAKE_DETAILS_PATH` to read them from somewhere other than
+`curated/dhs_daily/`, `curated/intakes/`, and `curated/intake_details/`.
 
 Open port 8501 through VS Code's port forwarding or an SSH tunnel; do not expose
 the dashboard port publicly. `SPARK_MASTER_URL` defaults to `local[*]` if it is
