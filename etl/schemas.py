@@ -43,3 +43,22 @@ INTAKE_SCHEMA = StructType(
 
 # Large per-record fields that live in the details table, not the core table.
 DETAIL_COLUMNS = ["intake_note", "intake_photo_b64"]
+
+# NYC Open Data "DHS Daily Report" (k46n-sa2m) API field -> curated column.
+# date_of_census becomes census_date (a date); every other field is a count.
+DHS_DAILY_COLUMNS = {
+    "date_of_census": "census_date",
+    "total_adults_in_shelter": "adults",
+    "total_children_in_shelter": "children",
+    "total_individuals_in_shelter": "individuals",
+    "single_adult_men_in_shelter": "single_adult_men",
+    "single_adult_women_in_shelter": "single_adult_women",
+    "total_single_adults_in_shelter": "single_adults",
+    "families_with_children_in_shelter": "families_with_children",
+    "adults_in_families_with_children_in_shelter": "family_adults",
+    "children_in_families_with_children_in_shelter": "family_children",
+    # The trailing underscore is in the source field name.
+    "total_individuals_in_families_with_children_in_shelter_": "family_individuals",
+    "adult_families_in_shelter": "adult_families",
+    "individuals_in_adult_families_in_shelter": "adult_family_individuals",
+}

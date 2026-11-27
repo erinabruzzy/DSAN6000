@@ -71,6 +71,37 @@ This writes `s3a://dsan6000-nyc-dashboard-data/curated/intakes/` (used by the
 dashboard) and `curated/intake_details/` (notes and photos), both partitioned
 by `intake_month`, and checks the row counts against the source.
 
+## Ingesting the DHS Daily Report
+
+`etl/dhs_daily_ingest.py` pulls the full DHS Daily Report history (about
+2,100 rows, one per day since March 2021) from the NYC Open Data API
+(`k46n-sa2m`). It needs the same AWS credentials as above:
+
+```bash
+export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
+uv run python etl/dhs_daily_ingest.py
+```
+
+Each run writes the API response as fetched to
+`raw/dhs_daily/fetched_date=YYYY-MM-DD/` (CSV, so every day's report is
+preserved) and rewrites `curated/dhs_daily/` (typed Parquet, used by the
+dashboard). It refuses to write if any value fails to parse or a census date
+repeats. Because every run re-fetches the whole history, a missed day is
+filled in by the next run.
+
+To run it every morning while the lab is up, add a cron entry on the master
+(`crontab -e`). Cron starts with a minimal environment, so use absolute paths
+and set the master URL in the line itself:
+
+```cron
+0 9 * * * cd $HOME/DSAN6000 && SPARK_MASTER_URL=spark://<MASTER_PRIVATE_IP>:7077 $HOME/.local/bin/uv run python etl/dhs_daily_ingest.py >> $HOME/dhs_daily_ingest.log 2>&1
+```
+
+AWS Academy credentials expire when the lab session ends, so paste the new
+AWS Details block into `~/.aws/credentials` at the start of each session.
+Runs with expired credentials fail at the S3 write and leave the bucket
+unchanged.
+
 ## Running the Dashboard
 
 Set the Spark standalone master URL and start the dashboard:
@@ -80,10 +111,10 @@ export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
 uv run streamlit run dashboard.py --server.address 127.0.0.1 --server.port 8501
 ```
 
-The report path defaults to the current daily report object. Set
-`DHS_DAILY_REPORT_PATH` if you upload a newer report under another name, and
-`INTAKE_PARQUET_PATH` to read the curated intake table from somewhere other
-than `curated/intakes/`.
+The dashboard reads the two curated tables built above and shows which ETL
+job to run if one is missing. Set `DHS_DAILY_PATH` or `INTAKE_PARQUET_PATH`
+to read them from somewhere other than `curated/dhs_daily/` and
+`curated/intakes/`.
 
 Open port 8501 through VS Code's port forwarding or an SSH tunnel; do not expose
 the dashboard port publicly. `SPARK_MASTER_URL` defaults to `local[*]` if it is

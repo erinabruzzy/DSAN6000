@@ -9,9 +9,18 @@ from pyspark.sql import SparkSession, functions as F
 st.set_page_config(page_title="NYC Shelter Snapshot", layout="wide")
 
 BUCKET = "dsan6000-nyc-dashboard-data"
-# Curated Parquet written by etl/intake_to_parquet.py (partitioned by intake_month).
-DEFAULT_INTAKE_PATH = f"s3a://{BUCKET}/curated/intakes"
-DEFAULT_REPORT_PATH = f"s3a://{BUCKET}/DHS_Daily_Report_20261120.csv"
+# Curated Parquet tables written by the jobs in etl/.
+DEFAULT_INTAKE_PATH = f"s3a://{BUCKET}/curated/intakes"  # intake_to_parquet.py
+DEFAULT_REPORT_PATH = f"s3a://{BUCKET}/curated/dhs_daily"  # dhs_daily_ingest.py
+REPORT_COLUMNS = [
+    "census_date",
+    "adults",
+    "children",
+    "individuals",
+    "single_adults",
+    "family_individuals",
+    "adult_family_individuals",
+]
 INTAKE_COLUMNS = [
     "synthetic_data",
     "intake_date",
@@ -39,28 +48,7 @@ def get_spark() -> SparkSession:
 
 @st.cache_data(ttl=3600, show_spinner="Loading the DHS daily report...")
 def load_daily_report(path: str) -> pd.DataFrame:
-    spark = get_spark()
-    report = spark.read.option("header", "true").csv(path)
-    report = report.toDF(*[column.strip() for column in report.columns])
-    return (
-        report.select(
-            F.to_date(F.col("Date of Census"), "MM/dd/yyyy").alias("census_date"),
-            F.col("Total Adults in Shelter").cast("long").alias("adults"),
-            F.col("Total Children in Shelter").cast("long").alias("children"),
-            F.col("Total Individuals in Shelter").cast("long").alias("individuals"),
-            F.col("Total Single Adults in Shelter")
-            .cast("long")
-            .alias("single_adults"),
-            F.col("Total Individuals in Families with Children in Shelter")
-            .cast("long")
-            .alias("family_individuals"),
-            F.col("Individuals in Adult Families in Shelter")
-            .cast("long")
-            .alias("adult_family_individuals"),
-        )
-        .filter(F.col("census_date").isNotNull())
-        .toPandas()
-    )
+    return get_spark().read.parquet(path).select(*REPORT_COLUMNS).toPandas()
 
 
 @st.cache_data(ttl=3600, show_spinner="Aggregating synthetic intake records...")
@@ -101,6 +89,21 @@ def load_intake_summary(path: str) -> tuple[pd.DataFrame, int]:
     return synthetic_summary, excluded_records
 
 
+def load_or_stop(loader, path: str, etl_script: str):
+    """Run a loader, or explain which ETL job to run if its table is missing."""
+    try:
+        return loader(path)
+    except AnalysisException as error:
+        if error.getCondition() != "PATH_NOT_FOUND":
+            raise
+        st.error(
+            f"No curated table at `{path}`. Run "
+            f"`uv run python etl/{etl_script}` on the Spark master first "
+            "(see README)."
+        )
+        st.stop()
+
+
 def format_count(value: object) -> str:
     if pd.isna(value):
         return "Unavailable"
@@ -116,8 +119,8 @@ st.caption(
 spark = get_spark()
 st.caption(f"Spark master: `{spark.sparkContext.master}`")
 
-report_path = os.getenv("DHS_DAILY_REPORT_PATH", DEFAULT_REPORT_PATH)
-report = load_daily_report(report_path)
+report_path = os.getenv("DHS_DAILY_PATH", DEFAULT_REPORT_PATH)
+report = load_or_stop(load_daily_report, report_path, "dhs_daily_ingest.py")
 report["census_date"] = pd.to_datetime(report["census_date"], errors="coerce")
 report = report.dropna(subset=["census_date"]).sort_values("census_date")
 if report.empty:
@@ -174,17 +177,9 @@ st.line_chart(population_trend)
 st.divider()
 st.subheader("Synthetic intake-record profile")
 intake_path = os.getenv("INTAKE_PARQUET_PATH", DEFAULT_INTAKE_PATH)
-try:
-    intakes, excluded_records = load_intake_summary(intake_path)
-except AnalysisException as error:
-    if getattr(error, "getCondition", lambda: None)() != "PATH_NOT_FOUND":
-        raise
-    st.error(
-        f"No curated intake table at `{intake_path}`. Run "
-        "`uv run python etl/intake_to_parquet.py` on the Spark master first "
-        "(see README)."
-    )
-    st.stop()
+intakes, excluded_records = load_or_stop(
+    load_intake_summary, intake_path, "intake_to_parquet.py"
+)
 undated_records = int(
     intakes.loc[intakes["intake_date"].isna(), "intake_records"].sum()
 )
