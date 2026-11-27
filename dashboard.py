@@ -5,8 +5,9 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 from pyspark.errors import AnalysisException
-from pyspark.sql import SparkSession, functions as F
+from pyspark.sql import functions as F
 
+from app_spark import BUCKET, get_spark, load_or_none
 from census import (
     ALERT_WINDOW,
     ALERT_Z,
@@ -43,7 +44,6 @@ from records import (
 
 st.set_page_config(page_title="NYC Shelter Snapshot", layout="wide")
 
-BUCKET = "dsan6000-nyc-dashboard-data"
 # Curated Parquet tables written by the jobs in etl/.
 DEFAULT_INTAKE_PATH = f"s3a://{BUCKET}/curated/intakes"  # intake_to_parquet.py
 DEFAULT_DETAILS_PATH = f"s3a://{BUCKET}/curated/intake_details"  # intake_to_parquet.py
@@ -86,21 +86,6 @@ INTAKE_COLUMNS = [
     "age",
     "children_count",
 ]
-
-
-@st.cache_resource
-def get_spark() -> SparkSession:
-    master = os.getenv("SPARK_MASTER_URL", "local[*]")
-    return (
-        SparkSession.builder.appName("NYC Shelter Dashboard")
-        .master(master)
-        .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.5.0")
-        .config(
-            "spark.hadoop.fs.s3a.aws.credentials.provider",
-            "org.apache.hadoop.fs.s3a.AnonymousAWSCredentialsProvider",
-        )
-        .getOrCreate()
-    )
 
 
 @st.cache_data(ttl=3600, show_spinner="Loading the DHS daily report...")
@@ -193,16 +178,6 @@ def load_record_details(path: str, day: date, intake_id: str) -> dict | None:
         .collect()
     )
     return rows[0].asDict() if rows else None
-
-
-def load_or_none(loader, path: str):
-    """Run a loader, or return None if its table doesn't exist yet."""
-    try:
-        return loader(path)
-    except AnalysisException as error:
-        if error.getCondition() != "PATH_NOT_FOUND":
-            raise
-        return None
 
 
 def load_or_stop(loader, path: str, etl_script: str):

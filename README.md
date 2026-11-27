@@ -68,8 +68,8 @@ reads only what it needs: one month's folder of `curated/intakes/` for the
 day's list, and one day's folder of `curated/intake_details/` for the note and
 photo. All of these records are synthetic.
 
-The calculations live in `census.py`, `districts.py`, `forecast.py`, and
-`records.py`; run their tests with `uv run pytest`. To also check the real
+The calculations live in `census.py`, `daily_report.py`, `districts.py`,
+`forecast.py`, and `records.py`; run their tests with `uv run pytest`. To also check the real
 tables (for example, that the district totals match the daily report), point
 `DHS_DAILY_TEST_PATH` and `DHS_DISTRICT_TEST_PATH` at local copies of the
 curated Parquet.
@@ -176,6 +176,43 @@ DHS adds one month at a time, so a weekly cron entry is plenty:
 30 9 * * 1 cd $HOME/DSAN6000 && SPARK_MASTER_URL=spark://<MASTER_PRIVATE_IP>:7077 $HOME/.local/bin/uv run python etl/dhs_district_ingest.py >> $HOME/dhs_district_ingest.log 2>&1
 ```
 
+## Generating the Daily Report
+
+`etl/daily_report.py` writes one report per day (issue #4). It reads the
+curated tables, fetches the NYC weather forecast
+([Open-Meteo](https://open-meteo.com/)), active
+[National Weather Service](https://www.weather.gov/documentation/services-web-api)
+alerts, and recent NYC homelessness news
+([GDELT](https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/), with
+Google News RSS added when GDELT is rate-limited or returns little). None of
+these APIs needs a key. The report covers:
+
+- **warnings**: overdue data sources, unusual census changes, weather hazards
+  (feels-like 32°F or colder, the NYC Code Blue threshold; heat; heavy rain or
+  snow; high wind), and active NWS alerts;
+- occupancy with 1-, 7-, 28-day, and 1-year changes, and the newest borough
+  breakdown;
+- the newest intake day and the next-day forecast;
+- the 3-day weather forecast and up to 8 headlines;
+- each data source's newest date and status.
+
+```bash
+export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
+uv run python etl/daily_report.py
+```
+
+Each report is saved with the raw API responses it used to
+`curated/daily_reports/report_date=YYYY-MM-DD/`, so past reports are kept;
+rerunning on the same day replaces only that day's report. An API that fails
+is noted in the report rather than stopping it. Run it after the daily ingest:
+
+```cron
+20 9 * * * cd $HOME/DSAN6000 && SPARK_MASTER_URL=spark://<MASTER_PRIVATE_IP>:7077 $HOME/.local/bin/uv run python etl/daily_report.py >> $HOME/daily_report.log 2>&1
+```
+
+The dashboard's **Daily report** page (in the sidebar) shows any saved report
+and offers it as a Markdown download.
+
 ## Running the Dashboard
 
 Set the Spark standalone master URL and start the dashboard:
@@ -187,9 +224,9 @@ uv run streamlit run dashboard.py --server.address 127.0.0.1 --server.port 8501
 
 The dashboard reads the two curated tables built above and shows which ETL
 job to run if one is missing. Set `DHS_DAILY_PATH`, `DHS_DISTRICT_PATH`,
-`INTAKE_PARQUET_PATH`, or `INTAKE_DETAILS_PATH` to read them from somewhere
-other than `curated/dhs_daily/`, `curated/dhs_district/`, `curated/intakes/`,
-and `curated/intake_details/`.
+`INTAKE_PARQUET_PATH`, `INTAKE_DETAILS_PATH`, or `DAILY_REPORTS_PATH` to read
+them from somewhere other than `curated/dhs_daily/`, `curated/dhs_district/`,
+`curated/intakes/`, `curated/intake_details/`, and `curated/daily_reports/`.
 
 Open port 8501 through VS Code's port forwarding or an SSH tunnel; do not expose
 the dashboard port publicly. `SPARK_MASTER_URL` defaults to `local[*]` if it is
