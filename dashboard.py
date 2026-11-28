@@ -17,6 +17,13 @@ from census import (
     group_trend,
     unusual_changes,
 )
+from districts import (
+    FACILITIES,
+    FACILITY_TYPES,
+    by_area,
+    month_on_or_before,
+    to_long,
+)
 from forecast import (
     INTERVAL,
     MIN_TRAINING_DAYS,
@@ -41,6 +48,7 @@ BUCKET = "dsan6000-nyc-dashboard-data"
 DEFAULT_INTAKE_PATH = f"s3a://{BUCKET}/curated/intakes"  # intake_to_parquet.py
 DEFAULT_DETAILS_PATH = f"s3a://{BUCKET}/curated/intake_details"  # intake_to_parquet.py
 DEFAULT_REPORT_PATH = f"s3a://{BUCKET}/curated/dhs_daily"  # dhs_daily_ingest.py
+DEFAULT_DISTRICT_PATH = f"s3a://{BUCKET}/curated/dhs_district"  # dhs_district_ingest.py
 ALL_HOUSEHOLDS = "All household types"
 REPORT_COLUMNS = list(
     dict.fromkeys(
@@ -136,6 +144,13 @@ def load_intake_summary(path: str) -> tuple[pd.DataFrame, int]:
         synthetic_summary["intake_date"], errors="coerce"
     )
     return synthetic_summary, excluded_records
+
+
+@st.cache_data(ttl=3600, show_spinner="Loading the census by community district...")
+def load_district_report(path: str) -> pd.DataFrame:
+    table = get_spark().read.parquet(path).toPandas()
+    table["report_date"] = pd.to_datetime(table["report_date"])
+    return table
 
 
 def _read_partition(path: str, partition: str):
@@ -239,10 +254,82 @@ def breakdown_chart(table: pd.DataFrame, colors: dict) -> alt.LayerChart:
     return (bars + labels).properties(height=alt.Step(40))
 
 
+def sync_click(chart_key: str, param: str, state_key: str, options: list, default) -> None:
+    """Copy a chart click into a selectbox's state before the selectbox renders.
+
+    Only a new click is copied, so the selectbox stays the single source of
+    truth and works without a pointer. Clearing the click picks `default`.
+    """
+    clicked = st.session_state.get(chart_key, {}).get("selection", {}).get(param, [])
+    value = clicked[0][param] if clicked else None
+    last_key = f"{state_key}_last_click"
+    if value != st.session_state.get(last_key):
+        st.session_state[last_key] = value
+        st.session_state[state_key] = value or default
+    if st.session_state.get(state_key) not in options:
+        st.session_state[state_key] = default
+
+
+def area_chart(wide: pd.DataFrame, selected: str | None, colors: dict) -> alt.LayerChart:
+    """Stacked bars of individuals per area by facility type, totals at the ends.
+
+    With `selected`, the bars are clickable (selection "area") and the other
+    areas are dimmed.
+    """
+    long = to_long(wide).assign(
+        facility_order=lambda frame: frame["facility_type"].map(FACILITY_TYPES.index),
+        highlighted=lambda frame: True if selected is None else frame["area"] == selected,
+    )
+    y = alt.Y("area:N", sort=list(wide["area"]), title=None, axis=alt.Axis(labelLimit=300))
+    bars = (
+        alt.Chart(long)
+        .mark_bar(
+            height={"band": 0.7},
+            stroke=colors["surface"],
+            strokeWidth=1,
+            cursor="default" if selected is None else "pointer",
+        )
+        .encode(
+            y=y,
+            x=alt.X(
+                "individuals:Q",
+                title="Individuals in shelter",
+                stack="zero",
+                axis=alt.Axis(labelExpr=COUNT_LABELS, tickCount=5),
+            ),
+            color=alt.Color(
+                "facility_type:N",
+                scale=alt.Scale(domain=FACILITY_TYPES, range=colors["series"]),
+                legend=alt.Legend(orient="top", title=None, labelLimit=0),
+            ),
+            order=alt.Order("facility_order:Q"),
+            opacity=alt.condition("datum.highlighted", alt.value(1), alt.value(0.35)),
+            tooltip=[
+                alt.Tooltip("area:N", title="Area"),
+                alt.Tooltip("facility_type:N", title="Facility type"),
+                alt.Tooltip("individuals:Q", title="Individuals", format=","),
+                alt.Tooltip("total:Q", title="Area total", format=","),
+                alt.Tooltip("share:Q", title="Share of total", format=".1%"),
+                alt.Tooltip("hotel_share:Q", title="Area share in commercial hotels", format=".0%"),
+            ],
+        )
+    )
+    if selected is not None:
+        bars = bars.add_params(alt.selection_point(name="area", fields=["area"]))
+    labels = (
+        alt.Chart(wide)
+        .mark_text(align="left", dx=6, color=colors["text"])
+        .encode(y=y, x=alt.X("total:Q"), text=alt.Text("total:Q", format=","))
+    )
+    return (bars + labels).properties(
+        height=alt.Step(34), padding={"left": 5, "top": 5, "bottom": 5, "right": 50}
+    )
+
+
 def household_chart(table: pd.DataFrame, selected: str, colors: dict) -> alt.LayerChart:
     """Clickable bars of intake records per household type; `selected` is highlighted."""
     table = table.assign(highlighted=(table["household_type"] == selected) | (selected == ALL_HOUSEHOLDS))
-    click = alt.selection_point(name="household", fields=["household_type"])
+    click = alt.selection_point(name="household_type", fields=["household_type"])
     base = alt.Chart(table).encode(
         y=alt.Y("household_type:N", sort="-x", title=None, axis=alt.Axis(labelLimit=300)),
         x=alt.X(
@@ -628,6 +715,70 @@ with st.expander("Table view"):
         width="stretch",
     )
 
+st.markdown("**Where people are sheltered**")
+district_path = os.getenv("DHS_DISTRICT_PATH", DEFAULT_DISTRICT_PATH)
+district_report = load_or_none(load_district_report, district_path)
+district_month = (
+    None if district_report is None else month_on_or_before(district_report, selected_day)
+)
+if district_report is None:
+    st.info(
+        f"No census by community district at `{district_path}` yet. Run "
+        "`uv run python etl/dhs_district_ingest.py` on the Spark master (see README)."
+    )
+elif district_month is None:
+    st.info(f"DHS has no census by community district on or before {selected_day:%B %d, %Y}.")
+else:
+    st.caption(
+        f"DHS publishes this census monthly. Showing {district_month:%B %d, %Y}, the latest "
+        "on or before the selected census date; its total matches the daily report for "
+        "that day. Facility types describe where people are housed, not their household "
+        "group: some adult families live in family-with-children facilities."
+    )
+    boroughs = by_area(district_report, district_month)
+    borough_options = list(boroughs["area"])
+    sync_click("borough_chart", "area", "drill_borough", borough_options, borough_options[0])
+    st.altair_chart(
+        area_chart(boroughs, st.session_state["drill_borough"], colors),
+        width="stretch",
+        on_select="rerun",
+        selection_mode="area",
+        key="borough_chart",
+    )
+    st.caption("Click a borough to see its community districts.")
+    district_borough = st.selectbox("Borough", borough_options, key="drill_borough")
+    district_rows = by_area(district_report, district_month, district_borough)
+    st.markdown(f"**{district_borough} by community district**")
+    st.altair_chart(area_chart(district_rows, None, colors), width="stretch")
+    with st.expander("Table view"):
+        facility_labels = {
+            column: f"{facility_type.removesuffix(' facilities')} · {kind}"
+            for column, (facility_type, kind) in FACILITIES.items()
+        }
+        st.dataframe(
+            pd.concat(
+                [
+                    boroughs.assign(level="Borough"),
+                    district_rows.assign(level=f"{district_borough} district"),
+                ]
+            )[["level", "area", "total", "share", "hotel_share", *FACILITIES]],
+            column_config={
+                "level": "Level",
+                "area": "Area",
+                "total": st.column_config.NumberColumn("Individuals", format="localized"),
+                "share": st.column_config.NumberColumn("Share of level", format="percent"),
+                "hotel_share": st.column_config.NumberColumn(
+                    "In commercial hotels", format="percent"
+                ),
+                **{
+                    column: st.column_config.NumberColumn(label, format="localized")
+                    for column, label in facility_labels.items()
+                },
+            },
+            hide_index=True,
+            width="stretch",
+        )
+
 st.divider()
 st.subheader("Synthetic intake-record profile")
 intakes, excluded_records = load_or_stop(
@@ -773,19 +924,13 @@ by_household["average_recorded_age"] = by_household["age_sum"].div(
 # click is copied into the selectbox (only when it changes), so the selectbox
 # is the single source of truth and works without a pointer.
 household_options = [ALL_HOUSEHOLDS, *sorted(by_household["household_type"])]
-clicked = st.session_state.get("household_chart", {}).get("selection", {}).get("household", [])
-clicked_household = clicked[0]["household_type"] if clicked else None
-if clicked_household != st.session_state.get("last_household_click"):
-    st.session_state["last_household_click"] = clicked_household
-    st.session_state["drill_household"] = clicked_household or ALL_HOUSEHOLDS
-if st.session_state.get("drill_household") not in household_options:
-    st.session_state["drill_household"] = ALL_HOUSEHOLDS
+sync_click("household_chart", "household_type", "drill_household", household_options, ALL_HOUSEHOLDS)
 
 st.altair_chart(
     household_chart(by_household, st.session_state["drill_household"], colors),
     width="stretch",
     on_select="rerun",
-    selection_mode="household",
+    selection_mode="household_type",
     key="household_chart",
 )
 st.caption("Click a bar to list that household type's records below.")

@@ -39,7 +39,13 @@ For the selected census date, the DHS section shows:
 - a breakdown of who is in shelter (single men and women, adults and children
   in families, adult families);
 - household-group trendlines, daily over the last 12 months or as monthly
-  averages since 2021.
+  averages since 2021;
+- **where people are sheltered**: individuals per borough by facility type
+  (adult, family with children, adult family), from DHS's monthly census by
+  community district. Click a borough to see its community districts. It
+  shows the latest month-end on or before the selected date, and its total
+  matches the daily report for that day. NYC does not publish available beds,
+  so this replaces the "available beds by location" view proposed in issue #5.
 
 Every chart has hover tooltips and a table view. A warning appears if the
 newest census is more than 4 days old, which usually means the daily ingest
@@ -62,8 +68,11 @@ reads only what it needs: one month's folder of `curated/intakes/` for the
 day's list, and one day's folder of `curated/intake_details/` for the note and
 photo. All of these records are synthetic.
 
-The calculations live in `census.py`, `forecast.py`, and `records.py`; run
-their tests with `uv run pytest`.
+The calculations live in `census.py`, `districts.py`, `forecast.py`, and
+`records.py`; run their tests with `uv run pytest`. To also check the real
+tables (for example, that the district totals match the daily report), point
+`DHS_DAILY_TEST_PATH` and `DHS_DISTRICT_TEST_PATH` at local copies of the
+curated Parquet.
 
 ![](images/dashboard_1.png)
 
@@ -146,6 +155,27 @@ AWS Details block into `~/.aws/credentials` at the start of each session.
 Runs with expired credentials fail at the S3 write and leave the bucket
 unchanged.
 
+## Ingesting the DHS Census by Community District
+
+`etl/dhs_district_ingest.py` pulls DHS's "Individual Census by Borough,
+Community District, and Facility Type" (`veav-vj3r`, about 5,700 rows: one
+per community district per month since July 2018). It works like the daily
+job: it re-fetches the whole history, keeps the response as fetched under
+`raw/dhs_district/fetched_date=YYYY-MM-DD/`, and rewrites
+`curated/dhs_district/`. Blank counts become 0 (with blanks as 0, every month
+adds up to the daily report's total for that date).
+
+```bash
+export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
+uv run python etl/dhs_district_ingest.py
+```
+
+DHS adds one month at a time, so a weekly cron entry is plenty:
+
+```cron
+30 9 * * 1 cd $HOME/DSAN6000 && SPARK_MASTER_URL=spark://<MASTER_PRIVATE_IP>:7077 $HOME/.local/bin/uv run python etl/dhs_district_ingest.py >> $HOME/dhs_district_ingest.log 2>&1
+```
+
 ## Running the Dashboard
 
 Set the Spark standalone master URL and start the dashboard:
@@ -156,9 +186,10 @@ uv run streamlit run dashboard.py --server.address 127.0.0.1 --server.port 8501
 ```
 
 The dashboard reads the two curated tables built above and shows which ETL
-job to run if one is missing. Set `DHS_DAILY_PATH`, `INTAKE_PARQUET_PATH`, or
-`INTAKE_DETAILS_PATH` to read them from somewhere other than
-`curated/dhs_daily/`, `curated/intakes/`, and `curated/intake_details/`.
+job to run if one is missing. Set `DHS_DAILY_PATH`, `DHS_DISTRICT_PATH`,
+`INTAKE_PARQUET_PATH`, or `INTAKE_DETAILS_PATH` to read them from somewhere
+other than `curated/dhs_daily/`, `curated/dhs_district/`, `curated/intakes/`,
+and `curated/intake_details/`.
 
 Open port 8501 through VS Code's port forwarding or an SSH tunnel; do not expose
 the dashboard port publicly. `SPARK_MASTER_URL` defaults to `local[*]` if it is

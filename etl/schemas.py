@@ -62,3 +62,24 @@ DHS_DAILY_COLUMNS = {
     "adult_families_in_shelter": "adult_families",
     "individuals_in_adult_families_in_shelter": "adult_family_individuals",
 }
+
+# NYC Open Data "Individual Census by Borough, Community District, and Facility
+# Type" (veav-vj3r) API field -> curated column. Monthly, as of each month's
+# last day. Blank counts mean no one in that facility type there (with blanks
+# as 0, each month sums to the DHS Daily Report total for that date).
+DHS_DISTRICT_KEYS = {
+    "report_date": "report_date",
+    "borough": "borough",
+    # Empty for shelters outside the city (Westchester).
+    "community_districts": "community_district",
+}
+DHS_DISTRICT_COUNTS = {
+    "adult_shelter": "adult_shelter",
+    "adult_shelter_comm_hotel": "adult_hotel",
+    # The misspelling is in the source field name.
+    "family_with_chidren_shelter": "family_shelter",
+    "family_with_children_comm": "family_hotel",
+    "family_cluster": "family_cluster",
+    "adult_family_shelter": "adult_family_shelter",
+    "adult_family_comm_hotel": "adult_family_hotel",
+}

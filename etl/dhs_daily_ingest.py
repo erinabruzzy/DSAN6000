@@ -16,39 +16,14 @@ Run on the Spark master (see README for the credential setup and cron line):
 
 import argparse
 import datetime as dt
-from urllib.parse import urlencode
 
-import pandas as pd
 from pyspark.sql import DataFrame, functions as F
 
+from open_data import fetch_dataset
 from schemas import DHS_DAILY_COLUMNS
 from spark_session import BUCKET, build_spark, load_aws_credentials
 
 API_URL = "https://data.cityofnewyork.us/resource/k46n-sa2m.csv"
-PAGE_SIZE = 50_000
-
-
-def fetch_report(api_url: str) -> pd.DataFrame:
-    """Download every row as strings, paging in case the dataset outgrows a page."""
-    pages = []
-    offset = 0
-    while True:
-        query = urlencode(
-            {"$order": "date_of_census", "$limit": PAGE_SIZE, "$offset": offset}
-        )
-        page = pd.read_csv(f"{api_url}?{query}", dtype=str, keep_default_na=False)
-        pages.append(page)
-        if len(page) < PAGE_SIZE:
-            break
-        offset += PAGE_SIZE
-    report = pd.concat(pages, ignore_index=True)
-
-    missing = sorted(set(DHS_DAILY_COLUMNS) - set(report.columns))
-    if missing:
-        raise SystemExit(f"The API response is missing expected fields: {missing}")
-    if report.empty:
-        raise SystemExit("The API returned no rows; leaving S3 unchanged.")
-    return report
 
 
 def curate(raw: DataFrame) -> DataFrame:
@@ -56,11 +31,11 @@ def curate(raw: DataFrame) -> DataFrame:
     date_field, *count_fields = DHS_DAILY_COLUMNS
     return raw.select(
         # Values look like 2026-11-25T00:00:00.000; the time is always midnight.
-        F.to_date(F.substring(date_field, 1, 10), "yyyy-MM-dd").alias(
+        F.try_to_date(F.substring(date_field, 1, 10), "yyyy-MM-dd").alias(
             DHS_DAILY_COLUMNS[date_field]
         ),
         *[
-            F.col(field).cast("long").alias(DHS_DAILY_COLUMNS[field])
+            F.col(field).try_cast("long").alias(DHS_DAILY_COLUMNS[field])
             for field in count_fields
         ],
     )
@@ -93,7 +68,7 @@ def main() -> None:
     parser.add_argument("--aws-profile", default="default")
     args = parser.parse_args()
 
-    report = fetch_report(args.api_url)
+    report = fetch_dataset(args.api_url, "date_of_census", DHS_DAILY_COLUMNS)
     print(f"Fetched {len(report):,} rows from {args.api_url}")
 
     spark = build_spark(load_aws_credentials(args.aws_profile), "DHS Daily Ingest")
