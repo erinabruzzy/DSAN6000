@@ -1,10 +1,12 @@
 """Convert the raw intake-log CSV into curated Parquet tables.
 
-Reads the single multiline CSV once and writes two tables, both partitioned
-by intake month:
+Reads the single multiline CSV once and writes two tables:
 
-  curated/intakes/         every field except the note and photo (for the dashboard)
-  curated/intake_details/  intake_id, intake_date, note, photo (for drill-down)
+  curated/intakes/         every field except the note and photo (for the
+                           dashboard), partitioned by intake_month
+  curated/intake_details/  intake_id, note, photo (for drill-down), partitioned
+                           by intake_date, so looking up one record reads one
+                           day's folder (about 15 MB) instead of a month's
 
 Run on the Spark master (see README for the credential setup):
 
@@ -77,10 +79,10 @@ def main() -> None:
     print(f"Wrote {intakes_path}")
 
     (
-        records.select("intake_id", "intake_date", "intake_month", *DETAIL_COLUMNS)
-        .repartition("intake_month")
+        records.select("intake_id", "intake_date", *DETAIL_COLUMNS)
+        .repartition("intake_date")
         .write.mode("overwrite")
-        .partitionBy("intake_month")
+        .partitionBy("intake_date")
         .parquet(details_path)
     )
     print(f"Wrote {details_path}")

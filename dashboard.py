@@ -1,5 +1,5 @@
 import os
-from datetime import timedelta
+from datetime import date, timedelta
 
 import altair as alt
 import pandas as pd
@@ -23,13 +23,23 @@ from forecast import (
     daily_counts,
     forecast_next_day,
 )
+from records import (
+    LIST_COLUMNS,
+    RECORD_COLUMNS,
+    decode_photo,
+    detail_sections,
+    escape_markdown,
+    format_value,
+)
 
 st.set_page_config(page_title="NYC Shelter Snapshot", layout="wide")
 
 BUCKET = "dsan6000-nyc-dashboard-data"
 # Curated Parquet tables written by the jobs in etl/.
 DEFAULT_INTAKE_PATH = f"s3a://{BUCKET}/curated/intakes"  # intake_to_parquet.py
+DEFAULT_DETAILS_PATH = f"s3a://{BUCKET}/curated/intake_details"  # intake_to_parquet.py
 DEFAULT_REPORT_PATH = f"s3a://{BUCKET}/curated/dhs_daily"  # dhs_daily_ingest.py
+ALL_HOUSEHOLDS = "All household types"
 REPORT_COLUMNS = list(
     dict.fromkeys(
         ["census_date", "individuals", "adults", "children", *GROUPS]
@@ -126,6 +136,48 @@ def load_intake_summary(path: str) -> tuple[pd.DataFrame, int]:
     return synthetic_summary, excluded_records
 
 
+def _read_partition(path: str, partition: str):
+    """Read one partition folder of a curated table, or None if it doesn't exist.
+
+    Reading the folder directly (with basePath) reads only that partition,
+    whatever type Spark would infer for the partition values.
+    """
+    try:
+        return get_spark().read.option("basePath", path).parquet(f"{path}/{partition}")
+    except AnalysisException as error:
+        if error.getCondition() != "PATH_NOT_FOUND":
+            raise
+        return None
+
+
+@st.cache_data(ttl=3600, max_entries=20, show_spinner="Loading that day's intake records...")
+def load_day_records(path: str, day: date) -> pd.DataFrame:
+    """Every synthetic intake record on `day` (curated/intakes is partitioned by month)."""
+    month = _read_partition(path, f"intake_month={day:%Y-%m}")
+    if month is None:
+        return pd.DataFrame(columns=RECORD_COLUMNS)
+    return (
+        month.filter((F.col("intake_date") == F.lit(day)) & F.col("synthetic_data"))
+        .select(*RECORD_COLUMNS)
+        .toPandas()
+    )
+
+
+@st.cache_data(ttl=3600, max_entries=50, show_spinner="Loading the intake note and photo...")
+def load_record_details(path: str, day: date, intake_id: str) -> dict | None:
+    """The note and photo for one record (curated/intake_details is partitioned by day)."""
+    records = _read_partition(path, f"intake_date={day:%Y-%m-%d}")
+    if records is None:
+        return None
+    rows = (
+        records.filter(F.col("intake_id") == F.lit(intake_id))
+        .select("intake_note", "intake_photo_b64")
+        .limit(1)
+        .collect()
+    )
+    return rows[0].asDict() if rows else None
+
+
 def load_or_stop(loader, path: str, etl_script: str):
     """Run a loader, or explain which ETL job to run if its table is missing."""
     try:
@@ -173,6 +225,35 @@ def breakdown_chart(table: pd.DataFrame, colors: dict) -> alt.LayerChart:
     )
     labels = base.mark_text(align="left", dx=6, color=colors["text"]).encode(
         text=alt.Text("individuals:Q", format=",")
+    )
+    return (bars + labels).properties(height=alt.Step(40))
+
+
+def household_chart(table: pd.DataFrame, selected: str, colors: dict) -> alt.LayerChart:
+    """Clickable bars of intake records per household type; `selected` is highlighted."""
+    table = table.assign(highlighted=(table["household_type"] == selected) | (selected == ALL_HOUSEHOLDS))
+    click = alt.selection_point(name="household", fields=["household_type"])
+    base = alt.Chart(table).encode(
+        y=alt.Y("household_type:N", sort="-x", title=None, axis=alt.Axis(labelLimit=300)),
+        x=alt.X(
+            "intake_records:Q",
+            title="Intake records",
+            axis=alt.Axis(labelExpr=COUNT_LABELS, tickCount=5),
+        ),
+        tooltip=[
+            alt.Tooltip("household_type:N", title="Household type"),
+            alt.Tooltip("intake_records:Q", title="Intake records", format=","),
+            alt.Tooltip("average_recorded_age:Q", title="Average recorded age", format=".1f"),
+            alt.Tooltip("children_recorded:Q", title="Children recorded", format=","),
+        ],
+    )
+    bars = (
+        base.mark_bar(color=colors["series"][0], cornerRadiusEnd=4, height={"band": 0.7}, cursor="pointer")
+        .encode(opacity=alt.condition("datum.highlighted", alt.value(1), alt.value(0.35)))
+        .add_params(click)
+    )
+    labels = base.mark_text(align="left", dx=6, color=colors["text"]).encode(
+        text=alt.Text("intake_records:Q", format=",")
     )
     return (bars + labels).properties(height=alt.Step(40))
 
@@ -614,7 +695,26 @@ by_household = (
 by_household["average_recorded_age"] = by_household["age_sum"].div(
     by_household["age_count"].where(by_household["age_count"] > 0)
 )
-st.bar_chart(by_household.set_index("household_type")["intake_records"])
+# A click on a bar picks the household type for the record list below. The
+# click is copied into the selectbox (only when it changes), so the selectbox
+# is the single source of truth and works without a pointer.
+household_options = [ALL_HOUSEHOLDS, *sorted(by_household["household_type"])]
+clicked = st.session_state.get("household_chart", {}).get("selection", {}).get("household", [])
+clicked_household = clicked[0]["household_type"] if clicked else None
+if clicked_household != st.session_state.get("last_household_click"):
+    st.session_state["last_household_click"] = clicked_household
+    st.session_state["drill_household"] = clicked_household or ALL_HOUSEHOLDS
+if st.session_state.get("drill_household") not in household_options:
+    st.session_state["drill_household"] = ALL_HOUSEHOLDS
+
+st.altair_chart(
+    household_chart(by_household, st.session_state["drill_household"], colors),
+    width="stretch",
+    on_select="rerun",
+    selection_mode="household",
+    key="household_chart",
+)
+st.caption("Click a bar to list that household type's records below.")
 st.dataframe(
     by_household[
         [
@@ -623,14 +723,115 @@ st.dataframe(
             "average_recorded_age",
             "children_recorded",
         ]
-    ].rename(
-        columns={
-            "household_type": "Household type",
-            "intake_records": "Intake records",
-            "average_recorded_age": "Average recorded age",
-            "children_recorded": "Children recorded",
-        }
-    ),
+    ],
+    column_config={
+        "household_type": "Household type",
+        "intake_records": st.column_config.NumberColumn("Intake records", format="localized"),
+        "average_recorded_age": st.column_config.NumberColumn(
+            "Average recorded age", format="%.1f"
+        ),
+        "children_recorded": st.column_config.NumberColumn(
+            "Children recorded", format="localized"
+        ),
+    },
     hide_index=True,
     width="stretch",
 )
+
+st.divider()
+st.subheader("Individual intake records")
+st.caption(
+    "Every record is synthetic. Pick a day and household type, then select a row "
+    "to open the full record with its intake note and photo."
+)
+picker_columns = st.columns(2)
+# No key, so the picker resets whenever the sidebar date range changes.
+record_day = picker_columns[0].date_input(
+    "Intake date",
+    value=end_date,
+    min_value=start_date,
+    max_value=end_date,
+    format="MM/DD/YYYY",
+)
+record_household = picker_columns[1].selectbox(
+    "Household type", household_options, key="drill_household"
+)
+
+day_records = load_day_records(intake_path, record_day)
+day_records["household_type"] = day_records["household_type"].fillna("Not reported")
+if selected_program != "All programs":
+    day_records = day_records.loc[day_records["program_type"] == selected_program]
+if record_household != ALL_HOUSEHOLDS:
+    day_records = day_records.loc[day_records["household_type"] == record_household]
+day_records = day_records.sort_values("intake_id").reset_index(drop=True)
+
+if day_records.empty:
+    st.info(f"No synthetic intake records match these choices on {record_day:%B %d, %Y}.")
+    st.stop()
+
+st.markdown(f"**{len(day_records):,} records on {record_day:%B %d, %Y}**")
+selection = st.dataframe(
+    day_records[list(LIST_COLUMNS)],
+    column_config={
+        column: (
+            st.column_config.NumberColumn(label, format="%d")
+            if column in ("age", "children_count")
+            else label
+        )
+        for column, label in LIST_COLUMNS.items()
+    },
+    hide_index=True,
+    width="stretch",
+    height=320,
+    on_select="rerun",
+    selection_mode="single-row",
+    # A new key per list clears the selected row when the list changes.
+    key=f"records_{record_day}_{record_household}_{selected_program}",
+)
+selected_rows = selection.selection.rows
+if not selected_rows:
+    st.caption("Select a row to open that record.")
+    st.stop()
+
+record = day_records.iloc[selected_rows[0]]
+details_path = os.getenv("INTAKE_DETAILS_PATH", DEFAULT_DETAILS_PATH)
+details = load_record_details(details_path, record_day, record["intake_id"])
+
+with st.container(border=True):
+    st.markdown(f"#### {escape_markdown(str(record['client_display_name']))}")
+    st.caption(f"Intake `{record['intake_id']}` · {record_day:%B %d, %Y} · {record['program_type']}")
+    photo_column, facts_column = st.columns([1, 3])
+    photo = decode_photo(details["intake_photo_b64"]) if details else None
+    if photo is not None:
+        photo_column.image(photo, caption="Intake photo (synthetic)", width=220)
+    else:
+        photo_column.caption("No photo could be shown for this record.")
+    fact_columns = facts_column.columns(3)
+    fact_columns[0].metric("Age", format_value(record["age"]))
+    fact_columns[1].metric("Children", format_value(record["children_count"]))
+    facts_column.markdown(
+        "  \n".join(
+            f"**{label}:** {escape_markdown(format_value(record[column]))}"
+            for column, label in [
+                ("household_type", "Household type"),
+                ("contact_type", "Contact type"),
+                ("presenting_reason", "Presenting reason"),
+            ]
+        )
+    )
+
+    section_columns = st.columns(2)
+    for column, (title, table) in zip(section_columns, detail_sections(record).items()):
+        column.markdown(f"**{title}**")
+        column.dataframe(table, hide_index=True, width="stretch")
+
+    st.markdown("**Intake note**")
+    if details is None:
+        st.info(
+            f"No note or photo found in `{details_path}` for this record. Run "
+            "`uv run python etl/intake_to_parquet.py` to rebuild the details table."
+        )
+    elif details["intake_note"]:
+        st.markdown(escape_markdown(details["intake_note"]))
+    else:
+        st.caption("No note was recorded.")
