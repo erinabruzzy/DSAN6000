@@ -23,6 +23,41 @@ This project aims to create an interactive dashboard to house all of the data pe
 The Streamlit dashboard separates the NYC DHS daily census totals from statistics
 calculated over the synthetic intake records.
 
+For the selected census date, the DHS section shows:
+
+- totals with their change from the previous day;
+- **alerts** for unusual day-over-day changes, meaning 3 or more standard
+  deviations from the average daily change over the previous 90 days (about 1%
+  of days per series in the 2021–2026 history);
+- a breakdown of who is in shelter (single men and women, adults and children
+  in families, adult families);
+- household-group trendlines, daily over the last 12 months or as monthly
+  averages since 2021.
+
+Every chart has hover tooltips and a table view. A warning appears if the
+newest census is more than 4 days old, which usually means the daily ingest
+job has stopped.
+
+The intake section opens with a **next-day intake forecast**. Intake records
+have a date but no time of day, so it forecasts the day after the latest
+intake. Three methods are compared: same weekday last week, the average of
+the last 4 same weekdays, and Holt-Winters with weekly seasonality. Each one
+forecasts each of the last 56 days from only the days before it, and the
+method with the lowest average error makes the forecast. Its past errors set
+an 80% range. The page shows every method's score and the day-by-day
+backtest.
+
+Below the household-type chart, the dashboard drills down to **individual
+intake records**. Click a bar (or use the selectbox) to choose a household
+type, pick a day in the sidebar's date range, and select a row to open the
+whole record: every field, the intake note, and the intake photo. Each step
+reads only what it needs: one month's folder of `curated/intakes/` for the
+day's list, and one day's folder of `curated/intake_details/` for the note and
+photo. All of these records are synthetic.
+
+The calculations live in `census.py`, `forecast.py`, and `records.py`; run
+their tests with `uv run pytest`.
+
 ![](images/dashboard_1.png)
 
 Intake records do not indicate
@@ -55,6 +90,55 @@ the EDA notebook, select the `.venv` kernel (`.venv/bin/python`) in VS Code or
 Jupyter. After pulling changes that touch `pyproject.toml` or `uv.lock`, run
 `uv sync` again.
 
+## Building the Curated Intake Tables
+
+The dashboard reads the intake records from curated Parquet tables rather than
+the 4 GB source CSV. Build them once (and again whenever the source CSV
+changes) on the Spark master. This step needs the AWS credentials described in
+[AWS S3 Bucket](#aws-s3-bucket) because it writes to the bucket:
+
+```bash
+export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
+uv run python etl/intake_to_parquet.py
+```
+
+This writes `s3a://dsan6000-nyc-dashboard-data/curated/intakes/` (every field
+except the note and photo, partitioned by `intake_month`) and
+`curated/intake_details/` (notes and photos, partitioned by `intake_date` so
+the dashboard can open one record without scanning a month of photos), and
+checks the row counts against the source.
+
+## Ingesting the DHS Daily Report
+
+`etl/dhs_daily_ingest.py` pulls the full DHS Daily Report history (about
+2,100 rows, one per day since March 2021) from the NYC Open Data API
+(`k46n-sa2m`). It needs the same AWS credentials as above:
+
+```bash
+export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
+uv run python etl/dhs_daily_ingest.py
+```
+
+Each run writes the API response as fetched to
+`raw/dhs_daily/fetched_date=YYYY-MM-DD/` (CSV, so every day's report is
+preserved) and rewrites `curated/dhs_daily/` (typed Parquet, used by the
+dashboard). It refuses to write if any value fails to parse or a census date
+repeats. Because every run re-fetches the whole history, a missed day is
+filled in by the next run.
+
+To run it every morning while the lab is up, add a cron entry on the master
+(`crontab -e`). Cron starts with a minimal environment, so use absolute paths
+and set the master URL in the line itself:
+
+```cron
+0 9 * * * cd $HOME/DSAN6000 && SPARK_MASTER_URL=spark://<MASTER_PRIVATE_IP>:7077 $HOME/.local/bin/uv run python etl/dhs_daily_ingest.py >> $HOME/dhs_daily_ingest.log 2>&1
+```
+
+AWS Academy credentials expire when the lab session ends, so paste the new
+AWS Details block into `~/.aws/credentials` at the start of each session.
+Runs with expired credentials fail at the S3 write and leave the bucket
+unchanged.
+
 ## Running the Dashboard
 
 Set the Spark standalone master URL and start the dashboard:
@@ -64,8 +148,10 @@ export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
 uv run streamlit run dashboard.py --server.address 127.0.0.1 --server.port 8501
 ```
 
-The report path defaults to the current daily report object. Set
-`DHS_DAILY_REPORT_PATH` if you upload a newer report under another name.
+The dashboard reads the two curated tables built above and shows which ETL
+job to run if one is missing. Set `DHS_DAILY_PATH`, `INTAKE_PARQUET_PATH`, or
+`INTAKE_DETAILS_PATH` to read them from somewhere other than
+`curated/dhs_daily/`, `curated/intakes/`, and `curated/intake_details/`.
 
 Open port 8501 through VS Code's port forwarding or an SSH tunnel; do not expose
 the dashboard port publicly. `SPARK_MASTER_URL` defaults to `local[*]` if it is
