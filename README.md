@@ -66,6 +66,36 @@ statistics are labeled as intake-record measures rather than current occupancy.
 
 ![](images/dashboard_2.png)
 
+## Spark Cluster (AWS)
+
+On the terminal of the master node, run:
+
+```
+cd ~/spark
+./sbin/start-master.sh --host <IP_ADDRESS>
+jps
+```
+
+On the terminal of the worker nodes, run:
+
+```
+cd ~/spark
+./sbin/start-worker.sh spark://<IP_ADDRESS>:7077
+jps
+```
+
+To stand down the master node, run:
+```
+./sbin/stop-master.sh
+```
+
+To stand down the worker nodes, run:
+```
+./sbin/stop-worker.sh
+```
+
+Then port-forward port 8080 on the master node to view Spark’s standalone Master UI. In VS Code, forward port 8080, then open http://localhost:8080
+
 ## Python Environment (uv)
 
 Dependencies are managed with [uv](https://docs.astral.sh/uv/) and pinned in
@@ -90,7 +120,7 @@ the EDA notebook, select the `.venv` kernel (`.venv/bin/python`) in VS Code or
 Jupyter. After pulling changes that touch `pyproject.toml` or `uv.lock`, run
 `uv sync` again.
 
-## Building the Curated Intake Tables
+## Building the Intake Tables
 
 The dashboard reads the intake records from curated Parquet tables rather than
 the 4 GB source CSV. Build them once (and again whenever the source CSV
@@ -98,7 +128,7 @@ changes) on the Spark master. This step needs the AWS credentials described in
 [AWS S3 Bucket](#aws-s3-bucket) because it writes to the bucket:
 
 ```bash
-export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
+export SPARK_MASTER_URL="spark://<IP_ADDRESS>:7077"
 uv run python etl/intake_to_parquet.py
 ```
 
@@ -115,7 +145,7 @@ checks the row counts against the source.
 (`k46n-sa2m`). It needs the same AWS credentials as above:
 
 ```bash
-export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
+export SPARK_MASTER_URL="spark://<IP_ADDRESS>:7077"
 uv run python etl/dhs_daily_ingest.py
 ```
 
@@ -144,7 +174,7 @@ unchanged.
 Set the Spark standalone master URL and start the dashboard:
 
 ```bash
-export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
+export SPARK_MASTER_URL="spark://<IP_ADDRESS>:7077"
 uv run streamlit run dashboard.py --server.address 127.0.0.1 --server.port 8501
 ```
 
