@@ -17,8 +17,7 @@ import configparser
 import os
 from pathlib import Path
 
-from pyspark import StorageLevel
-from pyspark.sql import SparkSession, functions as F
+from pyspark.sql import DataFrame, SparkSession, functions as F
 
 from schemas import DETAIL_COLUMNS, INTAKE_SCHEMA
 
@@ -51,6 +50,7 @@ def build_spark(credentials: dict[str, str]) -> SparkSession:
     builder = (
         SparkSession.builder.appName("NYC Shelter Intake ETL")
         .master(os.getenv("SPARK_MASTER_URL", "local[*]"))
+        .config("spark.executor.memory", os.getenv("SPARK_EXECUTOR_MEMORY", "3g"))
         .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.5.0")
         .config("spark.hadoop.fs.s3a.access.key", credentials["access_key"])
         .config("spark.hadoop.fs.s3a.secret.key", credentials["secret_key"])
@@ -68,50 +68,26 @@ def build_spark(credentials: dict[str, str]) -> SparkSession:
     return builder.getOrCreate()
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--source", default=DEFAULT_SOURCE)
-    parser.add_argument("--output", default=DEFAULT_OUTPUT)
-    parser.add_argument("--aws-profile", default="default")
-    parser.add_argument(
-        "--partitions",
-        type=int,
-        default=24,
-        help="Partitions to spread the single-file CSV across after reading.",
-    )
-    args = parser.parse_args()
-
-    spark = build_spark(load_aws_credentials(args.aws_profile))
-    print(f"Spark master: {spark.sparkContext.master}")
-    print(f"Source: {args.source}")
-
-    raw = (
+def read_intakes(spark: SparkSession, source: str) -> DataFrame:
+    return (
         spark.read.schema(INTAKE_SCHEMA)
         .option("header", "true")
         .option("multiLine", "true")
-        .csv(args.source)
-    )
-
-    # The EDA found synthetic_data is always true; keep the guard anyway so
-    # non-synthetic rows can never reach the curated tables.
-    records = (
-        raw.filter(F.col("synthetic_data") == F.lit(True))
+        .csv(source)
+        .filter(F.col("synthetic_data") == F.lit(True))
         .withColumn("intake_month", F.date_format("intake_date", "yyyy-MM"))
-        .repartition(args.partitions)
-        # A multiline CSV can only be read by one task; cache the parsed rows
-        # so both tables are written from a single scan.
-        .persist(StorageLevel.MEMORY_AND_DISK)
     )
 
-    kept_rows = records.count()  # materializes the cache
-    print(f"Synthetic rows kept: {kept_rows:,}")
 
-    intakes_path = f"{args.output}/intakes"
-    details_path = f"{args.output}/intake_details"
+def write_curated_tables(spark: SparkSession, source: str, output: str) -> int:
+    intakes_path = f"{output}/intakes"
+    intake_details_path = f"{output}/intake_details"
 
+    # The multiline CSV is read as one input partition. Keep each write narrow
+    # and avoid shuffling/caching the full rows, especially photos and notes.
     (
-        records.drop(*DETAIL_COLUMNS)
-        .repartition("intake_month")
+        read_intakes(spark, source)
+        .drop(*DETAIL_COLUMNS)
         .write.mode("overwrite")
         .partitionBy("intake_month")
         .parquet(intakes_path)
@@ -119,23 +95,41 @@ def main() -> None:
     print(f"Wrote {intakes_path}")
 
     (
-        records.select("intake_id", "intake_date", "intake_month", *DETAIL_COLUMNS)
-        .repartition("intake_month")
+        read_intakes(spark, source)
+        .select("intake_id", "intake_date", *DETAIL_COLUMNS)
         .write.mode("overwrite")
-        .partitionBy("intake_month")
-        .parquet(details_path)
+        .partitionBy("intake_date")
+        .parquet(intake_details_path)
     )
-    print(f"Wrote {details_path}")
+    print(f"Wrote {intake_details_path}")
 
-    # Verify the writes by reading the row counts back.
-    for name, path in [("intakes", intakes_path), ("intake_details", details_path)]:
-        written = spark.read.parquet(path).count()
-        status = "OK" if written == kept_rows else "MISMATCH"
-        print(f"{name}: {written:,} rows [{status}]")
-        if written != kept_rows:
-            raise SystemExit(f"{name} row count does not match the source.")
+    counts = {
+        intakes_path: spark.read.parquet(intakes_path).count(),
+        intake_details_path: spark.read.parquet(intake_details_path).count(),
+    }
+    if len(set(counts.values())) != 1:
+        raise SystemExit(
+            "Curated table row counts do not match: "
+            + ", ".join(f"{path}: {count:,}" for path, count in counts.items())
+        )
 
-    records.unpersist()
+    kept_rows = next(iter(counts.values()))
+    print(f"intakes: {kept_rows:,} rows [OK]")
+    print(f"intake_details: {kept_rows:,} rows [OK]")
+    return kept_rows
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--source", default=DEFAULT_SOURCE)
+    parser.add_argument("--output", default=DEFAULT_OUTPUT)
+    parser.add_argument("--aws-profile", default="default")
+    args = parser.parse_args()
+
+    spark = build_spark(load_aws_credentials(args.aws_profile))
+    print(f"Spark master: {spark.sparkContext.master}")
+    print(f"Source: {args.source}")
+    write_curated_tables(spark, args.source, args.output)
     spark.stop()
 
 

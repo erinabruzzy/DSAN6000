@@ -20,51 +20,63 @@ This project aims to create an interactive dashboard to house all of the data pe
 
 ## Data Dashboard
 
-The Streamlit dashboard separates the NYC DHS daily census totals from statistics
-calculated over the synthetic intake records.
+The initial section of the dashboard contains the aggregate totals reported by NYC. The DHS census totals describe reported shelter population; intake statistics describe intake records, not current residents. A day-over-day change is flagged when it is 3 or more standard deviations from the average daily change over the previous 90 days.
 
-For the selected census date, the DHS section shows:
+![header](images/dashboard_1.png)
 
-- totals with their change from the previous day;
-- **alerts** for unusual day-over-day changes, meaning 3 or more standard
-  deviations from the average daily change over the previous 90 days (about 1%
-  of days per series in the 2021–2026 history);
-- a breakdown of who is in shelter (single men and women, adults and children
-  in families, adult families);
-- household-group trendlines, daily over the last 12 months or as monthly
-  averages since 2021.
+The synthetic intake-record profile section forecasts the day after the latest intake (November 11, 2026), using all synthetic records regardless of the filters. Method: Average of the last 4 same weekdays, which had the lowest average error when each of the last 56 days was forecast from only the days before it. The range covers 80% of those errors.
 
-Every chart has hover tooltips and a table view. A warning appears if the
-newest census is more than 4 days old, which usually means the daily ingest
-job has stopped.
+![forecast](images/dashboard_4.png)
 
-The intake section opens with a **next-day intake forecast**. Intake records
-have a date but no time of day, so it forecasts the day after the latest
-intake. Three methods are compared: same weekday last week, the average of
-the last 4 same weekdays, and Holt-Winters with weekly seasonality. Each one
-forecasts each of the last 56 days from only the days before it, and the
-method with the lowest average error makes the forecast. Its past errors set
-an 80% range. The page shows every method's score and the day-by-day
-backtest.
+The synthetic intake records also allow a user to pick a day and household type, then select a row to open the full record with its intake note and photo.
 
-Below the household-type chart, the dashboard drills down to **individual
-intake records**. Click a bar (or use the selectbox) to choose a household
-type, pick a day in the sidebar's date range, and select a row to open the
-whole record: every field, the intake note, and the intake photo. Each step
-reads only what it needs: one month's folder of `curated/intakes/` for the
-day's list, and one day's folder of `curated/intake_details/` for the note and
-photo. All of these records are synthetic.
+![photo](images/dashboard_3.png)
 
-The calculations live in `census.py`, `forecast.py`, and `records.py`; run
-their tests with `uv run pytest`.
+## Spark Cluster (AWS)
 
-![](images/dashboard_1.png)
+### On the terminal of the master node, run:
 
-Intake records do not indicate
-whether a person is currently in shelter, so their counts and age/children
-statistics are labeled as intake-record measures rather than current occupancy.
+```
+cd ~/spark
+./sbin/start-master.sh --host <IP_ADDRESS>
+jps
+```
 
-![](images/dashboard_2.png)
+**This code chunk is only required before ETL**:
+```
+mkdir -p "$HOME/spark/tmp"
+export SPARK_LOCAL_DIRS="$HOME/spark/tmp"
+export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
+uv run python etl/intake_to_parquet.py
+```
+
+### On the terminal of the worker nodes, run:
+
+**This code chunk is only required before ETL**:
+```
+mkdir -p "$HOME/spark/tmp"
+SPARK_LOCAL_DIRS="$HOME/spark/tmp" ./sbin/start-worker.sh spark://<MASTER_PRIVATE_IP>:7077
+```
+
+then:
+
+```
+cd ~/spark
+./sbin/start-worker.sh spark://<IP_ADDRESS>:7077
+jps
+```
+
+To stand down the master node, run:
+```
+./sbin/stop-master.sh
+```
+
+To stand down the worker nodes, run:
+```
+./sbin/stop-worker.sh
+```
+
+Then port-forward port 8080 on the master node to view Spark’s standalone Master UI. In VS Code, forward port 8080, then open http://localhost:8080
 
 ## Python Environment (uv)
 
@@ -90,23 +102,29 @@ the EDA notebook, select the `.venv` kernel (`.venv/bin/python`) in VS Code or
 Jupyter. After pulling changes that touch `pyproject.toml` or `uv.lock`, run
 `uv sync` again.
 
-## Building the Curated Intake Tables
+## Building the Intake Tables
 
 The dashboard reads the intake records from curated Parquet tables rather than
 the 4 GB source CSV. Build them once (and again whenever the source CSV
-changes) on the Spark master. This step needs the AWS credentials described in
+changes) on the Spark master. The CSV contains multiline fields, so Spark reads
+it as one input partition. The job scans it twice, once for the smaller intake
+table and once for notes and photos, to avoid shuffling and caching every field
+together. This favors lower executor memory and scratch-space use over speed.
+The ETL requests a 3 GiB executor heap by default; set `SPARK_EXECUTOR_MEMORY`
+to override it if the worker memory available to Spark is different.
+This step needs the AWS credentials described in
 [AWS S3 Bucket](#aws-s3-bucket) because it writes to the bucket:
 
 ```bash
-export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
+export SPARK_MASTER_URL="spark://<IP_ADDRESS>:7077"
 uv run python etl/intake_to_parquet.py
 ```
 
 This writes `s3a://dsan6000-nyc-dashboard-data/curated/intakes/` (every field
 except the note and photo, partitioned by `intake_month`) and
 `curated/intake_details/` (notes and photos, partitioned by `intake_date` so
-the dashboard can open one record without scanning a month of photos), and
-checks the row counts against the source.
+the dashboard can open one record without scanning a month of photos), then
+checks that the two output tables have matching row counts.
 
 ## Ingesting the DHS Daily Report
 
@@ -115,7 +133,7 @@ checks the row counts against the source.
 (`k46n-sa2m`). It needs the same AWS credentials as above:
 
 ```bash
-export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
+export SPARK_MASTER_URL="spark://<IP_ADDRESS>:7077"
 uv run python etl/dhs_daily_ingest.py
 ```
 
@@ -144,7 +162,7 @@ unchanged.
 Set the Spark standalone master URL and start the dashboard:
 
 ```bash
-export SPARK_MASTER_URL="spark://<MASTER_PRIVATE_IP>:7077"
+export SPARK_MASTER_URL="spark://<IP_ADDRESS>:7077"
 uv run streamlit run dashboard.py --server.address 127.0.0.1 --server.port 8501
 ```
 
