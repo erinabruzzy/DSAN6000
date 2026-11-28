@@ -13,6 +13,7 @@ from census import (
     GROUPS,
     SUBGROUPS,
     breakdown,
+    changes_since,
     group_trend,
     unusual_changes,
 )
@@ -22,6 +23,7 @@ from forecast import (
     NextDayForecast,
     daily_counts,
     forecast_next_day,
+    latest_day_summary,
 )
 from records import (
     LIST_COLUMNS,
@@ -178,19 +180,27 @@ def load_record_details(path: str, day: date, intake_id: str) -> dict | None:
     return rows[0].asDict() if rows else None
 
 
-def load_or_stop(loader, path: str, etl_script: str):
-    """Run a loader, or explain which ETL job to run if its table is missing."""
+def load_or_none(loader, path: str):
+    """Run a loader, or return None if its table doesn't exist yet."""
     try:
         return loader(path)
     except AnalysisException as error:
         if error.getCondition() != "PATH_NOT_FOUND":
             raise
+        return None
+
+
+def load_or_stop(loader, path: str, etl_script: str):
+    """Run a loader, or explain which ETL job to run if its table is missing."""
+    result = load_or_none(loader, path)
+    if result is None:
         st.error(
             f"No curated table at `{path}`. Run "
             f"`uv run python etl/{etl_script}` on the Spark master first "
             "(see README)."
         )
         st.stop()
+    return result
 
 
 def format_count(value: object) -> str:
@@ -469,6 +479,71 @@ if days_behind > STALE_AFTER_DAYS:
         icon=":material/schedule:",
     )
 
+st.subheader("Latest data at a glance")
+st.caption(
+    "The newest day in each dataset, whatever dates the sidebar selects. Both "
+    "sources are daily, so there is nothing finer than a day: DHS publishes each "
+    "census about two days later, and intake records have no time of day."
+)
+intake_path = os.getenv("INTAKE_PARQUET_PATH", DEFAULT_INTAKE_PATH)
+census_box, intake_box = st.columns([3, 2])
+with census_box.container(border=True):
+    latest_changes = changes_since(report, latest_day)
+    total = latest_changes.iloc[0]
+    st.markdown(f"**DHS census, {latest_day:%A, %B %d, %Y}**")
+    st.metric(
+        "Individuals in shelter",
+        f"{total['count']:,}",
+        None if pd.isna(total["previous day"]) else f"{total['previous day']:+,} vs previous day",
+        delta_color="off",
+    )
+    st.dataframe(
+        latest_changes,
+        column_config={
+            "series": "Group",
+            "count": st.column_config.NumberColumn("Individuals", format="localized"),
+            "previous day": st.column_config.NumberColumn("Change: 1 day", format="%+d"),
+            "a week earlier": st.column_config.NumberColumn("7 days", format="%+d"),
+            "four weeks earlier": st.column_config.NumberColumn("28 days", format="%+d"),
+        },
+        hide_index=True,
+        width="stretch",
+    )
+    st.caption("Changes since 1, 7, and 28 days earlier; blank if DHS has no report for that day.")
+with intake_box.container(border=True):
+    glance_intakes = load_or_none(load_intake_summary, intake_path)
+    glance_dated = (
+        glance_intakes[0].dropna(subset=["intake_date"]) if glance_intakes else pd.DataFrame()
+    )
+    if glance_dated.empty:
+        st.markdown("**Synthetic intake records**")
+        st.caption("No intake records yet; see the intake section below.")
+    else:
+        glance_counts = daily_counts(glance_dated["intake_date"], glance_dated["intake_records"])
+        newest = latest_day_summary(glance_counts)
+        st.markdown(f"**Synthetic intake records, {newest.date:%A, %B %d, %Y}**")
+        st.metric(
+            "Intake records",
+            f"{newest.count:,}",
+            None
+            if newest.weekday_average is None
+            else f"{newest.count - newest.weekday_average:+,.0f} vs the last 4 {newest.date:%A}s",
+            delta_color="off",
+        )
+        lines = []
+        if newest.weekday_average is not None:
+            lines.append(
+                f"The last 4 {newest.date:%A}s averaged {newest.weekday_average:,.0f} intakes."
+            )
+        upcoming = cached_forecast(glance_counts)
+        if upcoming is not None:
+            lines.append(
+                f"Forecast for {upcoming.date:%A, %B %d}: **{upcoming.value:,.0f}** "
+                f"({INTERVAL:.0%} range {upcoming.low:,.0f} – {upcoming.high:,.0f}); "
+                "details in the intake section below."
+            )
+        st.markdown("  \n".join(lines))
+
 st.subheader(f"DHS reported population — {selected_report_date:%B %d, %Y}")
 previous_rows = report.loc[report["census_date"] == selected_day - pd.DateOffset(days=1)]
 previous_report = previous_rows.iloc[-1] if not previous_rows.empty else None
@@ -555,7 +630,6 @@ with st.expander("Table view"):
 
 st.divider()
 st.subheader("Synthetic intake-record profile")
-intake_path = os.getenv("INTAKE_PARQUET_PATH", DEFAULT_INTAKE_PATH)
 intakes, excluded_records = load_or_stop(
     load_intake_summary, intake_path, "intake_to_parquet.py"
 )

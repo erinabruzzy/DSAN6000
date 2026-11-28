@@ -9,6 +9,7 @@ from forecast import (
     backtest,
     daily_counts,
     forecast_next_day,
+    latest_day_summary,
     same_weekday_last_week,
 )
 
@@ -79,3 +80,14 @@ def test_forecast_is_never_negative():
 
 def test_too_little_history_returns_none():
     assert forecast_next_day(weekly_counts(days=35)) is None
+
+
+def test_latest_day_compares_with_the_last_four_same_weekdays():
+    counts = weekly_counts(days=60)
+    counts.iloc[-1] += 50
+    result = latest_day_summary(counts)
+
+    assert result.date == counts.index[-1]
+    assert result.count == WEEKLY_PATTERN[result.date.dayofweek] + 50
+    assert result.weekday_average == WEEKLY_PATTERN[result.date.dayofweek]
+    assert latest_day_summary(weekly_counts(days=20)).weekday_average is None

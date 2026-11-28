@@ -5,7 +5,15 @@ import os
 import pandas as pd
 import pytest
 
-from census import GROUPS, SUBGROUPS, breakdown, group_trend, unusual_changes
+from census import (
+    ALERT_COLUMNS,
+    GROUPS,
+    SUBGROUPS,
+    breakdown,
+    changes_since,
+    group_trend,
+    unusual_changes,
+)
 
 
 def make_report(days: int = 120, start: str = "2026-01-01") -> pd.DataFrame:
@@ -117,3 +125,22 @@ def test_real_report_groups_add_up():
     for group_column in GROUPS:
         parts = [column for group, _, column in SUBGROUPS if GROUPS[group_column] == group]
         assert (report[parts].sum(axis=1) == report[group_column]).all()
+
+
+def test_changes_since_each_horizon_and_missing_dates():
+    dates = pd.date_range("2026-01-01", periods=30, freq="D")
+    report = pd.DataFrame({"census_date": dates})
+    for offset, column in enumerate(ALERT_COLUMNS):
+        report[column] = [100 * (offset + 1) + day for day in range(30)]
+    as_of = dates[-1]
+
+    table = changes_since(report, as_of)
+
+    assert list(table["series"]) == list(ALERT_COLUMNS.values())
+    assert list(table["previous day"]) == [1] * len(ALERT_COLUMNS)
+    assert list(table["a week earlier"]) == [7] * len(ALERT_COLUMNS)
+    assert list(table["four weeks earlier"]) == [28] * len(ALERT_COLUMNS)
+
+    # Drop the row from a week earlier: that change becomes missing, not wrong.
+    gappy = report.loc[report["census_date"] != as_of - pd.DateOffset(days=7)]
+    assert changes_since(gappy, as_of)["a week earlier"].isna().all()
